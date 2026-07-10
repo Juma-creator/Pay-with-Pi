@@ -1,0 +1,11 @@
+node_modules
+npm-debug.log
+.git
+.github
+logs
+*.pem
+.env
+.env.local
+.DS_Store
+dist
+build
