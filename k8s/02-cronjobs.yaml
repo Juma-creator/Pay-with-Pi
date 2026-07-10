@@ -1,0 +1,192 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: paywithpi-compliance-replay
+  namespace: paywithpi
+  labels:
+    app: paywithpi-compliance
+    compliance-level: critical
+spec:
+  schedule: "0 */6 * * *"  # Every 6 hours
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  
+  jobTemplate:
+    spec:
+      backoffLimit: 3
+      ttlSecondsAfterFinished: 86400  # Keep for 24 hours
+      
+      template:
+        metadata:
+          labels:
+            app: paywithpi-compliance
+            compliance-level: critical
+            audit-required: "true"
+          annotations:
+            security.compliance/encryption-required: "true"
+        
+        spec:
+          serviceAccountName: compliance-replay
+          automountServiceAccountToken: false
+          restartPolicy: Never
+          
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            runAsGroup: 1001
+            fsGroup: 1001
+            seccompProfile:
+              type: RuntimeDefault
+          
+          containers:
+            - name: compliance-replay
+              image: paywithpi-compliance:latest
+              imagePullPolicy: IfNotPresent
+              
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                runAsNonRoot: true
+                capabilities:
+                  drop:
+                    - ALL
+              
+              env:
+                - name: REGION
+                  valueFrom:
+                    configMapKeyRef:
+                      name: compliance-config
+                      key: region
+                - name: CLUSTER
+                  valueFrom:
+                    configMapKeyRef:
+                      name: compliance-config
+                      key: cluster
+                - name: COMPLIANCE_MODE
+                  valueFrom:
+                    configMapKeyRef:
+                      name: compliance-config
+                      key: compliance-mode
+                - name: OPERATOR_ID
+                  valueFrom:
+                    configMapKeyRef:
+                      name: compliance-config
+                      key: operator-id
+                - name: REGULATOR_WEBHOOK_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: compliance-secrets
+                      key: regulator-api-token
+              
+              volumeMounts:
+                - name: compliance-logs
+                  mountPath: /app/logs/compliance
+                - name: certs
+                  mountPath: /etc/certs
+                  readOnly: true
+                - name: secrets
+                  mountPath: /etc/secrets
+                  readOnly: true
+                - name: tmp
+                  mountPath: /tmp
+              
+              resources:
+                requests:
+                  cpu: "250m"
+                  memory: "256Mi"
+                limits:
+                  cpu: "500m"
+                  memory: "512Mi"
+          
+          volumes:
+            - name: compliance-logs
+              persistentVolumeClaim:
+                claimName: compliance-logs-pvc
+            - name: certs
+              secret:
+                secretName: compliance-tls-certs
+                defaultMode: 0400
+            - name: secrets
+              secret:
+                secretName: compliance-secrets
+                defaultMode: 0400
+            - name: tmp
+              emptyDir: {}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: compliance-audit-backup
+  namespace: paywithpi
+  labels:
+    app: paywithpi-compliance
+spec:
+  schedule: "0 */6 * * *"  # Every 6 hours, aligned with replay
+  concurrencyPolicy: Forbid
+  
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      ttlSecondsAfterFinished: 604800  # Keep for 7 days
+      
+      template:
+        spec:
+          serviceAccountName: compliance-replay
+          restartPolicy: OnFailure
+          
+          containers:
+            - name: backup
+              image: amazon/aws-cli:latest
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -e
+                  BACKUP_DATE=$(date +%Y%m%d-%H%M%S)
+                  REGION=${REGION:-africa}
+                  
+                  echo "📦 Starting backup for $REGION at $BACKUP_DATE"
+                  
+                  # Verify audit chain before backup
+                  if ! node /app/verify-audit-chain.js /app/logs/compliance/audit-chain.json; then
+                    echo "❌ Audit chain verification failed - backup aborted"
+                    exit 1
+                  fi
+                  
+                  # Backup to S3 (warm storage)
+                  aws s3 sync /app/logs/compliance \
+                    s3://paywithpi-compliance-backups/warm/${REGION}/$(date +%Y/%m/%d)/${BACKUP_DATE}/ \
+                    --sse=AES256 \
+                    --storage-class STANDARD_IA
+                  
+                  echo "✅ Backup completed: $BACKUP_DATE"
+              
+              env:
+                - name: AWS_REGION
+                  value: "us-east-1"
+                - name: AWS_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: backup-credentials
+                      key: access-key
+                - name: AWS_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: backup-credentials
+                      key: secret-key
+                - name: REGION
+                  valueFrom:
+                    configMapKeyRef:
+                      name: compliance-config
+                      key: region
+              
+              volumeMounts:
+                - name: compliance-logs
+                  mountPath: /app/logs/compliance
+                  readOnly: true
+          
+          volumes:
+            - name: compliance-logs
+              persistentVolumeClaim:
+                claimName: compliance-logs-pvc

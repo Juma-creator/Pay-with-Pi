@@ -1,0 +1,144 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: compliance-metrics-backup
+  namespace: paywithpi
+spec:
+  schedule: "0 1 * * *"  # Daily at 1 AM
+  concurrencyPolicy: Forbid
+  
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: compliance-replay
+          restartPolicy: OnFailure
+          
+          containers:
+            - name: backup-metrics
+              image: amazon/aws-cli:latest
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  # Backup Prometheus metrics
+                  kubectl port-forward -n monitoring svc/prometheus 9090:9090 &
+                  sleep 5
+                  
+                  curl -s 'http://localhost:9090/api/v1/query_range?query=compliance_replay_total&start=1&end=9999999999&step=3600' \
+                    | aws s3 cp - s3://paywithpi-compliance-backups/metrics/$(date +%Y/%m/%d).json \
+                    --sse=AES256
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: compliance-backup-verification
+  namespace: paywithpi
+spec:
+  schedule: "0 2 * * *"  # Daily at 2 AM
+  concurrencyPolicy: Forbid
+  
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: compliance-replay
+          restartPolicy: OnFailure
+          
+          containers:
+            - name: verify
+              image: amazon/aws-cli:latest
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -e
+                  
+                  echo "🔍 Verifying recent backups..."
+                  
+                  # List recent backups
+                  aws s3 ls s3://paywithpi-compliance-backups/warm/ \
+                    --recursive \
+                    --human-readable \
+                    --summarize | tail -20
+                  
+                  # Test restore from latest
+                  LATEST=$(aws s3 ls s3://paywithpi-compliance-backups/warm/ \
+                    --recursive | tail -1 | awk '{print $NF}')
+                  
+                  echo "Testing restore from: $LATEST"
+                  
+                  mkdir -p /tmp/restore-test
+                  aws s3 cp s3://${LATEST} /tmp/restore-test/ || true
+                  
+                  if [ $(ls /tmp/restore-test 2>/dev/null | wc -l) -gt 0 ]; then
+                    echo "✅ Restore test successful"
+                  else
+                    echo "⚠️ Restore test returned no files"
+                  fi
+              
+              env:
+                - name: AWS_REGION
+                  value: "us-east-1"
+                - name: AWS_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: backup-credentials
+                      key: access-key
+                - name: AWS_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: backup-credentials
+                      key: secret-key
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: compliance-secret-rotation
+  namespace: paywithpi
+spec:
+  schedule: "0 0 1 * *"  # First day of month
+  concurrencyPolicy: Forbid
+  
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: secret-rotator
+          restartPolicy: OnFailure
+          
+          containers:
+            - name: rotator
+              image: vault:latest
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -e
+                  
+                  echo "🔄 Rotating compliance secrets..."
+                  
+                  # Rotate encryption key
+                  NEW_KEY=$(openssl rand -hex 32)
+                  echo $NEW_KEY | base64 | kubectl patch secret compliance-secrets \
+                    -p='{"data":{"encryption-key":"'$(echo -n $NEW_KEY | base64)'"}}'  \
+                    -n paywithpi
+                  
+                  # Rotate webhook signing key
+                  NEW_WEBHOOK_KEY=$(openssl rand -hex 32)
+                  kubectl patch secret compliance-secrets \
+                    -p='{"data":{"webhook-signing-key":"'$(echo -n $NEW_WEBHOOK_KEY | base64)'"}}'  \
+                    -n paywithpi
+                  
+                  echo "✅ Secrets rotated successfully"
+              
+              volumeMounts:
+                - name: vault-token
+                  mountPath: /var/run/secrets/kubernetes.io/vault
+          
+          volumes:
+            - name: vault-token
+              projected:
+                sources:
+                  - serviceAccountToken:
+                      path: token

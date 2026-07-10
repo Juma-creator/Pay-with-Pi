@@ -1,0 +1,108 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: compliance-zero-trust
+  namespace: paywithpi
+spec:
+  podSelector:
+    matchLabels:
+      app: paywithpi-compliance
+  
+  policyTypes:
+    - Ingress
+    - Egress
+  
+  ingress:
+    # Allow from Prometheus scraper
+    - from:
+      - podSelector:
+          matchLabels:
+            app: prometheus
+      - namespaceSelector:
+          matchLabels:
+            name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9090
+    
+    # Allow from AlertManager
+    - from:
+      - podSelector:
+          matchLabels:
+            app: alertmanager
+      - namespaceSelector:
+          matchLabels:
+            name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9093
+  
+  egress:
+    # Allow DNS
+    - to:
+      - namespaceSelector:
+          matchLabels:
+            name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    
+    # Allow HTTPS to Regulator webhook
+    - to:
+      - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 443
+    
+    # Allow to database (if applicable)
+    - to:
+      - podSelector:
+          matchLabels:
+            app: postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: compliance-quota
+  namespace: paywithpi
+spec:
+  hard:
+    requests.cpu: "2"
+    requests.memory: "2Gi"
+    limits.cpu: "4"
+    limits.memory: "4Gi"
+    pods: "10"
+    persistentvolumeclaims: "2"
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: compliance-limits
+  namespace: paywithpi
+spec:
+  limits:
+    - type: Pod
+      min:
+        cpu: "100m"
+        memory: "128Mi"
+      max:
+        cpu: "1"
+        memory: "1Gi"
+    - type: Container
+      min:
+        cpu: "50m"
+        memory: "64Mi"
+      max:
+        cpu: "500m"
+        memory: "512Mi"
+      defaultRequest:
+        cpu: "250m"
+        memory: "256Mi"
+      default:
+        cpu: "500m"
+        memory: "512Mi"
