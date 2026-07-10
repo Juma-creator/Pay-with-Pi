@@ -1,0 +1,145 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-compliance
+  namespace: monitoring
+data:
+  compliance-dashboard.json: |
+    {
+      "dashboard": {
+        "id": null,
+        "uid": "paywithpi-compliance-replay",
+        "title": "PayWithPi Compliance Replay Monitoring",
+        "description": "Multi-region compliance replay monitoring and audit trail",
+        "tags": ["paywithpi", "compliance", "federation", "regulatory"],
+        "timezone": "browser",
+        "panels": [
+          {
+            "id": 1,
+            "title": "Replay Success Rate / Kiwango cha Mafanikio",
+            "type": "gauge",
+            "datasource": "Prometheus",
+            "targets": [
+              {
+                "expr": "sum(rate(compliance_replay_success_total[5m])) / sum(rate(compliance_replay_total[5m])) * 100",
+                "legendFormat": "Success Rate"
+              }
+            ],
+            "fieldConfig": {
+              "defaults": {
+                "unit": "percent",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    { "color": "red", "value": 0 },
+                    { "color": "yellow", "value": 70 },
+                    { "color": "green", "value": 90 }
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "id": 2,
+            "title": "Replay Latency / Muda wa Ucheleweshaji",
+            "type": "timeseries",
+            "datasource": "Prometheus",
+            "targets": [
+              {
+                "expr": "histogram_quantile(0.95, sum(rate(compliance_replay_latency_seconds_bucket[5m])) by (le, region))",
+                "legendFormat": "P95 - {{region}}"
+              },
+              {
+                "expr": "histogram_quantile(0.99, sum(rate(compliance_replay_latency_seconds_bucket[5m])) by (le, region))",
+                "legendFormat": "P99 - {{region}}"
+              }
+            ],
+            "fieldConfig": {
+              "defaults": {
+                "unit": "s",
+                "custom": {
+                  "lineWidth": 2
+                }
+              }
+            }
+          },
+          {
+            "id": 3,
+            "title": "Replay Status by Region / Hali kwa Kanda",
+            "type": "table",
+            "datasource": "Prometheus",
+            "targets": [
+              {
+                "expr": "sum(rate(compliance_replay_total[5m])) by (region, status)",
+                "format": "table",
+                "instant": true
+              }
+            ]
+          },
+          {
+            "id": 4,
+            "title": "Audit Log Volume / Kiasi cha Kumbukumbu",
+            "type": "barchart",
+            "datasource": "Prometheus",
+            "targets": [
+              {
+                "expr": "sum(increase(audit_log_entries_total[1h])) by (region)",
+                "legendFormat": "{{region}}"
+              }
+            ]
+          },
+          {
+            "id": 5,
+            "title": "Data Integrity Check / Uhakiki wa Takwimu",
+            "type": "stat",
+            "datasource": "Prometheus",
+            "targets": [
+              {
+                "expr": "audit_log_integrity_check_pass",
+                "legendFormat": "{{region}}"
+              }
+            ],
+            "fieldConfig": {
+              "defaults": {
+                "color": { "mode": "thresholds" },
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    { "color": "red", "value": 0 },
+                    { "color": "green", "value": 1 }
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "id": 6,
+            "title": "SLO Compliance / Utii wa Kumbukumbu",
+            "type": "gauge",
+            "datasource": "Prometheus",
+            "targets": [
+              {
+                "expr": "avg(slo_compliance_ratio) * 100",
+                "legendFormat": "Overall SLO"
+              }
+            ],
+            "fieldConfig": {
+              "defaults": {
+                "unit": "percent",
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    { "color": "red", "value": 0 },
+                    { "color": "orange", "value": 95 },
+                    { "color": "green", "value": 99 }
+                  ]
+                }
+              }
+            }
+          }
+        ],
+        "refresh": "30s",
+        "schemaVersion": 38,
+        "version": 1
+      }
+    }

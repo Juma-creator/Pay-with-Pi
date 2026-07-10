@@ -1,0 +1,268 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: compliance-replay-alerts
+  namespace: paywithpi
+spec:
+  groups:
+    - name: compliance.rules
+      interval: 30s
+      rules:
+        # ==================== AVAILABILITY ALERTS ====================
+        
+        - alert: ComplianceReplayUnavailable
+          expr: |
+            increase(compliance_replay_total[10m]) == 0
+          for: 15m
+          labels:
+            severity: critical
+            component: compliance
+            slo: availability
+          annotations:
+            summary: "No compliance replays executed in {{ $labels.region }} for 15 minutes"
+            description: "Scheduled compliance replays are not running. Check CronJob status and pod logs."
+            runbook_url: "https://wiki.paywithpi.global/runbooks/replay-unavailable"
+            dashboard_url: "https://grafana.paywithpi.global/d/compliance"
+        
+        # ==================== PERFORMANCE ALERTS ====================
+        
+        - alert: ComplianceReplayHighLatency
+          expr: |
+            histogram_quantile(0.95, 
+              sum(rate(compliance_replay_latency_seconds_bucket[5m])) by (le, region, operation)
+            ) > 10
+          for: 5m
+          labels:
+            severity: warning
+            component: compliance
+            slo: latency
+          annotations:
+            summary: "Compliance replay P95 latency > 10s in {{ $labels.region }} ({{ $labels.operation }})"
+            description: |
+              Current P95: {{ $value | humanizeDuration }}
+              Target: < 5s
+              Operation: {{ $labels.operation }}
+            runbook_url: "https://wiki.paywithpi.global/runbooks/high-latency"
+        
+        - alert: ComplianceReplayLatencySLOBreach
+          expr: |
+            histogram_quantile(0.95, 
+              sum(rate(compliance_replay_latency_seconds_bucket[5m])) by (le, region)
+            ) > 5
+          for: 10m
+          labels:
+            severity: warning
+            component: compliance
+            slo: latency
+          annotations:
+            summary: "Compliance replay latency SLO breach in {{ $labels.region }}"
+            description: "P95 latency: {{ $value | humanizeDuration }} (SLO: 5s)"
+        
+        # ==================== RELIABILITY ALERTS ====================
+        
+        - alert: ComplianceReplaySuccessRateLow
+          expr: |
+            (
+              sum(rate(compliance_replay_success_total[5m])) by (region)
+              /
+              sum(rate(compliance_replay_total[5m])) by (region)
+            ) * 100 < 90
+          for: 5m
+          labels:
+            severity: warning
+            component: compliance
+            slo: reliability
+          annotations:
+            summary: "Compliance replay success rate < 90% in {{ $labels.region }}"
+            description: "Current success rate: {{ humanizePercentage $value }}"
+        
+        - alert: ComplianceReplayFailureRate
+          expr: |
+            sum(rate(compliance_replay_total{status="failure"}[5m])) by (region) > 0
+          for: 2m
+          labels:
+            severity: critical
+            component: compliance
+            slo: reliability
+          annotations:
+            summary: "Compliance replay failures in {{ $labels.region }}"
+            description: "Failure rate: {{ $value | humanize }} failures/sec"
+        
+        # ==================== DATA INTEGRITY ALERTS ====================
+        
+        - alert: AuditChainIntegrityFailure
+          expr: |
+            audit_log_integrity_check_pass{region=~".*"} == 0
+          for: 1m
+          labels:
+            severity: critical
+            component: compliance
+            audit: integrity
+          annotations:
+            summary: "🚨 CRITICAL: Audit chain integrity check failed in {{ $labels.region }}"
+            description: "Hash chain validation failure detected! This is a data integrity violation."
+            runbook_url: "https://wiki.paywithpi.global/runbooks/integrity-failure"
+        
+        - alert: AuditLogEntriesMissing
+          expr: |
+            increase(audit_log_entries_total[10m]) == 0 AND increase(compliance_replay_total[10m]) > 0
+          for: 10m
+          labels:
+            severity: critical
+            component: compliance
+            audit: logging
+          annotations:
+            summary: "Compliance replays executed but audit logs not generated in {{ $labels.region }}"
+            description: "This is a critical compliance violation"
+        
+        # ==================== WEBHOOK/DELIVERY ALERTS ====================
+        
+        - alert: RegulatorWebhookDeliveryFailure
+          expr: |
+            sum(rate(webhook_delivery_total{status="failure"}[5m])) by (region, endpoint) > 0
+          for: 2m
+          labels:
+            severity: critical
+            component: compliance
+            regulator: notification
+          annotations:
+            summary: "Regulator webhook delivery failing in {{ $labels.region }}"
+            description: "Endpoint: {{ $labels.endpoint }}. Regulator has no visibility into compliance status."
+            runbook_url: "https://wiki.paywithpi.global/runbooks/webhook-failure"
+        
+        # ==================== ENCRYPTION/SECURITY ALERTS ====================
+        
+        - alert: EncryptionOperationFailure
+          expr: |
+            sum(rate(encryption_operations_total{status="failure"}[5m])) by (region, operation) > 0
+          for: 2m
+          labels:
+            severity: critical
+            component: compliance
+            security: encryption
+          annotations:
+            summary: "Encryption operation failure in {{ $labels.region }} ({{ $labels.operation }})"
+            description: "Audit logs may not be properly encrypted or decrypted."
+        
+        # ==================== SLO ALERTS ====================
+        
+        - alert: ComplianceAvailabilitySLOBreach
+          expr: |
+            slo_compliance_ratio{slo_name="availability"} < 0.999
+          for: 1h
+          labels:
+            severity: critical
+            component: compliance
+            slo: availability
+          annotations:
+            summary: "Compliance replay availability SLO breach in {{ $labels.region }}"
+            description: "Current compliance: {{ humanizePercentage $value }}. Target: 99.9%"
+        
+        - alert: ComplianceSLOBurnRate
+          expr: |
+            (1 - slo_compliance_ratio{slo_name="availability"}) > 0.01
+          for: 5m
+          labels:
+            severity: warning
+            component: compliance
+            slo: burn_rate
+          annotations:
+            summary: "SLO burn rate high in {{ $labels.region }}"
+            description: "Burn rate: {{ humanizePercentage $value }}"
+        
+        # ==================== RESOURCE ALERTS ====================
+        
+        - alert: ComplianceReplayPodMemoryHigh
+          expr: |
+            (container_memory_usage_bytes{pod=~".*compliance-replay.*"} /
+             container_spec_memory_limit_bytes) > 0.9
+          for: 5m
+          labels:
+            severity: warning
+            component: compliance
+            resource: memory
+          annotations:
+            summary: "Compliance replay pod memory > 90% in {{ $labels.namespace }}"
+            description: "Current: {{ humanizePercentage $value }}"
+        
+        - alert: ComplianceLogsPVCFull
+          expr: |
+            (kubelet_volume_stats_used_bytes{persistentvolumeclaim=~".*compliance.*"} /
+             kubelet_volume_stats_capacity_bytes) > 0.9
+          for: 5m
+          labels:
+            severity: critical
+            component: compliance
+            resource: storage
+          annotations:
+            summary: "Compliance logs PVC > 90% full in {{ $labels.namespace }}"
+            description: "Used: {{ humanizePercentage $value }}. Increase PVC size immediately."
+        
+        # ==================== STALE METRICS ALERT ====================
+        
+        - alert: ComplianceReplayMetricsStale
+          expr: |
+            time() - timestamp(compliance_replay_total) > 600
+          for: 5m
+          labels:
+            severity: critical
+            component: compliance
+            monitoring: stale_data
+          annotations:
+            summary: "Compliance replay metrics stale (> 10 min) in {{ $labels.region }}"
+            description: "Process may be hung, crashed, or not scraping properly."
+            runbook_url: "https://wiki.paywithpi.global/runbooks/metrics-stale"
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: compliance-slo-recording-rules
+  namespace: paywithpi
+spec:
+  groups:
+    - name: compliance.slo
+      interval: 30s
+      rules:
+        # Availability SLO: 99.9%
+        - record: slo:compliance_availability:ratio_5m
+          expr: |
+            (
+              sum(rate(compliance_replay_total{status="success"}[5m])) by (region, cluster)
+              /
+              sum(rate(compliance_replay_total[5m])) by (region, cluster)
+            ) >= 0
+        
+        - record: slo_compliance_ratio{slo_name="availability"}
+          expr: |
+            avg(slo:compliance_availability:ratio_5m) by (region, cluster)
+        
+        # Latency SLO: P95 < 5 seconds
+        - record: slo:compliance_latency:p95_5m
+          expr: |
+            histogram_quantile(0.95,
+              sum(rate(compliance_replay_latency_seconds_bucket[5m])) by (le, region, cluster)
+            )
+        
+        - record: slo:compliance_latency:ratio_5m
+          expr: |
+            (slo:compliance_latency:p95_5m <= 5) or vector(0)
+        
+        # Error Rate SLO: < 0.5% errors
+        - record: slo:compliance_error_rate:ratio_5m
+          expr: |
+            (
+              (1 - (
+                sum(rate(compliance_replay_total{status="failure"}[5m])) by (region, cluster)
+                /
+                sum(rate(compliance_replay_total[5m])) by (region, cluster)
+              )) >= 0.995
+            ) or vector(0)
+        
+        # Delivery SLO: 100%
+        - record: slo:webhook_delivery:ratio_5m
+          expr: |
+            (
+              sum(rate(webhook_delivery_total{status="success"}[5m])) by (region, cluster, endpoint)
+              /
+              sum(rate(webhook_delivery_total[5m])) by (region, cluster, endpoint)
+            ) >= 1.0 or vector(0)

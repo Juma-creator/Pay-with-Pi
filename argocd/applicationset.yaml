@@ -1,0 +1,89 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: paywithpi-compliance-multi-cluster
+  namespace: argocd
+spec:
+  generators:
+    - list:
+        elements:
+          - cluster: africa
+            url: https://africa.k8s.paywithpi.global
+            region: Tanzania
+          - cluster: asia
+            url: https://asia.k8s.paywithpi.global
+            region: Singapore
+          - cluster: europe
+            url: https://europe.k8s.paywithpi.global
+            region: Ireland
+  
+  template:
+    metadata:
+      name: '{{cluster}}-paywithpi-compliance'
+      annotations:
+        region: '{{region}}'
+    
+    spec:
+      project: compliance-replay
+      
+      source:
+        repoURL: https://github.com/Juma-creator/Pay-with-Pi
+        targetRevision: feature/compliance-replay-complete
+        path: k8s
+        helm:
+          values: |
+            region: {{region}}
+            cluster: {{cluster}}
+            complianceMode: sandbox
+            image:
+              tag: latest
+      
+      destination:
+        server: '{{url}}'
+        namespace: paywithpi
+      
+      syncPolicy:
+        syncOptions:
+          - CreateNamespace=true
+        automated:
+          prune: false
+          selfHeal: true
+        retry:
+          limit: 5
+          backoff:
+            duration: 5s
+            factor: 2
+            maxDuration: 3m
+        syncWindow:
+          - kind: allow
+            schedule: '0 2 * * *'
+            duration: 1h
+          - kind: deny
+            schedule: '0 9-17 * * 1-5'
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: compliance-replay
+  namespace: argocd
+spec:
+  description: PayWithPi Compliance Replay Project
+  sourceRepos:
+    - 'https://github.com/Juma-creator/Pay-with-Pi'
+  destinations:
+    - server: https://africa.k8s.paywithpi.global
+      namespace: 'paywithpi'
+    - server: https://asia.k8s.paywithpi.global
+      namespace: 'paywithpi'
+    - server: https://europe.k8s.paywithpi.global
+      namespace: 'paywithpi'
+  namespaceResourceBlacklist:
+    - group: ''
+      kind: ResourceQuota
+    - group: ''
+      kind: NetworkPolicy
+  clusterResourceBlacklist:
+    - group: ''
+      kind: Namespace
+    - group: 'rbac.authorization.k8s.io'
+      kind: ClusterRole
